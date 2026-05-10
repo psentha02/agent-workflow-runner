@@ -1,0 +1,37 @@
+# 1. ServiceAccount — the identity that the job-launcher Pod runs as
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: job-launcher-sa
+  namespace: default
+
+---
+# 2. Role — exactly what that identity is allowed to do
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-launcher-role
+  namespace: default
+rules:
+  - apiGroups: ["batch"]          # Jobs live in the batch API group
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]               # "" means the core API group
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+
+---
+# 3. RoleBinding — connects the identity to the permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-launcher-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: job-launcher-sa         # the identity from above
+    namespace: default
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: job-launcher-role         # the permissions from above

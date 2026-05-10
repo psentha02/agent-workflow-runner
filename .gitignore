@@ -1,0 +1,18 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Docker
+.dockerignore
+
+# K8s secrets — never commit real values
+k8s/secret.yaml
+
+# OS
+.DS_Store
+EOF

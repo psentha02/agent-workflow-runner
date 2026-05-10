@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: default
+spec:
+  serviceName: redis-service      # must match the Service name below
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine  # alpine = small image, faster pulls
+          command:
+            - redis-server
+            - "--appendonly"
+            - "yes"               # enable AOF persistence — writes to /data/appendonly.aof
+            - "--appendfsync"
+            - "everysec"          # flush to disk every second (balance of safety vs perf)
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: redis-data    # matches volumeClaimTemplates name below
+              mountPath: /data    # Redis writes persistence files here by default
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]  # returns PONG when ready
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+  volumeClaimTemplates:           # this is what makes it a StatefulSet, not a Deployment
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]   # one node can mount this at a time
+        resources:
+          requests:
+            storage: 1Gi

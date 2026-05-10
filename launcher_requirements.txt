@@ -1,0 +1,2 @@
+redis==5.0.4
+kubernetes==29.0.0
