@@ -6,7 +6,7 @@ A Kubernetes-native AI task platform that runs multi-step LangGraph agents as is
 
 ## What this is
 
-Most AI agent demos run inside a single process. This project treats AI workloads the way production infrastructure teams do — as isolated, schedulable, observable units of compute. Each agent task gets its own Kubernetes Job with its own resource limits, failure domain, and lifecycle. One stuck agent cannot affect others. A crashed worker retries automatically. Everything is visible on a Grafana dashboard. The entire system is packaged as a Helm chart and deployable to any Kubernetes cluster in one command.
+Most AI agent demos run inside a single process. This project treats AI workloads the way production infrastructure teams do — as isolated, schedulable, observable units of compute. Each agent task gets its own Kubernetes Job with its own resource limits, failure domain, and lifecycle. One stuck agent cannot affect others. A crashed worker retries automatically. Everything is visible on a Grafana dashboard. The entire application is packaged as a Helm chart deployable in one command.
 
 ---
 
@@ -89,7 +89,7 @@ The full reasoning trace is stored in Redis and returned via the API — plan, s
 | **Service (ClusterIP)** | FastAPI, Redis | Stable DNS for inter-Pod communication |
 | **Headless Service** | Redis | Direct Pod DNS for StatefulSet stable identity |
 | **ServiceMonitor** | FastAPI metrics | Prometheus operator discovers scrape targets declaratively |
-| **Helm Chart** | Full application | Single-command install, configurable values, repeatable deploys |
+| **Helm Chart** | Application layer | Single-command install, configurable values, repeatable deploys |
 
 ---
 
@@ -140,59 +140,99 @@ agent-workflow-runner/
 
 ---
 
-## Quick start — Helm
-
-### Prerequisites
+## Prerequisites
 
 - Docker Desktop running
 - `brew install k3d kubectl helm`
 - An Anthropic API key
 
-### 1 — Create cluster and import images
+---
+
+## Installation
+
+The system has two layers — cluster-wide observability infrastructure and the application itself. They are installed separately because Prometheus and Grafana are cluster-wide tools that multiple applications can share. If your cluster already has Prometheus installed, skip Step 2.
+
+> **Planned improvement:** a future release will add `kube-prometheus-stack` as a Helm sub-chart dependency so the entire system installs in one command. For now the two-step process below is required.
+
+### Step 1 — Create the cluster and import images
 
 ```bash
 k3d cluster create agentcluster \
   --agents 1 \
   --port "8080:80@loadbalancer"
 
+# Build and import all three images into k3d
 cd app    && docker build -t agent-api:v4 .    && k3d image import agent-api:v4 -c agentcluster    && cd ..
 cd worker && docker build -t agent-worker:v5 . && k3d image import agent-worker:v5 -c agentcluster && cd ..
 docker build -f Dockerfile.launcher -t job-launcher:v1 .
 k3d image import job-launcher:v1 -c agentcluster
 ```
 
-### 2 — Install observability stack
+### Step 2 — Install Prometheus and Grafana (cluster-wide observability)
+
+This installs the `kube-prometheus-stack` Helm chart into a dedicated `monitoring` namespace. It includes Prometheus, Grafana, kube-state-metrics, and the Prometheus operator.
 
 ```bash
 helm repo add prometheus-community \
   https://prometheus-community.github.io/helm-charts
 helm repo update
+
 kubectl create namespace monitoring
+
 helm install prometheus-stack \
   prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --set grafana.adminPassword=admin \
   --set prometheus.prometheusSpec.scrapeInterval=15s
+
+# Wait for all monitoring Pods to reach Running
+kubectl get pods -n monitoring -w
 ```
 
-### 3 — Install the application chart
+Once running, the observability stack is accessible via port-forward:
 
 ```bash
+# Grafana — http://localhost:3000 (admin / admin)
+kubectl port-forward -n monitoring service/prometheus-stack-grafana 3000:80
+
+# Prometheus — http://localhost:9090
+kubectl port-forward -n monitoring \
+  service/prometheus-stack-kube-prom-prometheus 9090:9090
+```
+
+### Step 3 — Install the application chart
+
+```bash
+# Validate templates before touching the cluster
 helm lint ./charts/agent-runner --set anthropicApiKey=test
 
+# Install into a dedicated namespace
 helm install agent-runner ./charts/agent-runner \
   --namespace agent-runner \
   --create-namespace \
   --set anthropicApiKey=$ANTHROPIC_API_KEY
 
+# Watch all Pods come up
 kubectl get pods -n agent-runner -w
 ```
 
-### 4 — Submit a task and watch it run
+You should see `redis-0`, `fastapi-*`, and `job-launcher-*` all reach `Running`. The job-launcher logs will confirm it is watching the queue:
 
 ```bash
+kubectl logs deployment/job-launcher -n agent-runner
+# Loaded in-cluster config
+# [launcher] watching queue 'task_queue' on redis-service
+```
+
+---
+
+## Submitting tasks
+
+```bash
+# Port-forward FastAPI
 kubectl port-forward -n agent-runner service/fastapi-service 9001:80
 
+# Submit a research task (triggers web search path)
 TASK_ID=$(curl -s -X POST http://localhost:9001/tasks \
   -H "Content-Type: application/json" \
   -d '{"type": "research", "input": "What is the operator pattern in Kubernetes?"}' \
@@ -200,6 +240,10 @@ TASK_ID=$(curl -s -X POST http://localhost:9001/tasks \
 
 echo "task_id: $TASK_ID"
 
+# Watch the Job Pod appear and run
+kubectl get pods -n agent-runner -w
+
+# Poll for completion
 for i in {1..30}; do
   STATUS=$(curl -s http://localhost:9001/tasks/$TASK_ID \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
@@ -208,30 +252,54 @@ for i in {1..30}; do
   sleep 3
 done
 
+# Read the full result and reasoning trace
 curl -s http://localhost:9001/tasks/$TASK_ID \
   | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 result = json.loads(d['result'])
-print('ANSWER:', result['answer'][:400])
-print('STEPS:', result['trace']['steps_taken'])
-print('SEARCHED:', result['trace']['needed_search'])
+print('=== ANSWER ===')
+print(result['answer'][:500])
+print()
+print('=== TRACE ===')
+print('plan:', result['trace']['plan'])
+print('needed_search:', result['trace']['needed_search'])
+print('steps_taken:', result['trace']['steps_taken'])
 "
+```
+
+Submit a summarization task (skips web search, faster):
+
+```bash
+curl -s -X POST http://localhost:9001/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"type": "summarize", "input": "Explain the difference between a Kubernetes Job and a Deployment"}'
 ```
 
 ---
 
-## Helm reference
+## Grafana dashboards
+
+With Grafana running at `http://localhost:3000`, add these panels to a new dashboard:
+
+| Panel | PromQL | What it shows |
+|---|---|---|
+| Submission rate | `rate(tasks_submitted_total[5m])` | Tasks submitted per second |
+| Queue depth | `task_queue_depth` | Tasks waiting in the Redis queue |
+| Success rate | `rate(tasks_completed_total{status="complete"}[5m])` | Completions per second |
+| Failure rate | `rate(tasks_completed_total{status="failed"}[5m])` | Failures per second |
+| p99 latency | `histogram_quantile(0.99, rate(task_duration_seconds_bucket[5m]))` | 99th percentile agent duration |
+
+Generate load to populate the dashboard:
 
 ```bash
-helm template agent-runner ./charts/agent-runner --set anthropicApiKey=test
-helm lint ./charts/agent-runner --set anthropicApiKey=test
-helm install agent-runner ./charts/agent-runner --namespace agent-runner --create-namespace --set anthropicApiKey=$ANTHROPIC_API_KEY
-helm upgrade agent-runner ./charts/agent-runner --namespace agent-runner --set anthropicApiKey=$ANTHROPIC_API_KEY
-helm get values agent-runner -n agent-runner
-helm get manifest agent-runner -n agent-runner
-helm uninstall agent-runner -n agent-runner
-helm list -A
+for i in {1..10}; do
+  curl -s -X POST http://localhost:9001/tasks \
+    -H "Content-Type: application/json" \
+    -d "{\"type\": \"research\", \"input\": \"kubernetes concept $i\"}" > /dev/null
+  echo "submitted task $i"
+  sleep 3
+done
 ```
 
 ---
@@ -251,7 +319,7 @@ GET /tasks/{task_id}
       "answer": "<final answer>",
       "trace": {
         "plan": "<Claude plan>",
-        "needed_search": true|false,
+        "needed_search": true | false,
         "search_results": ["..."],
         "reasoning": "<Claude reasoning>",
         "steps_taken": 4
@@ -259,38 +327,92 @@ GET /tasks/{task_id}
     },
     "duration_seconds", "created_at", "updated_at"
   }
+  Status values: queued → running → complete | failed
 
 GET /healthz   → { "status": "ok", "redis": "connected" }
-GET /metrics   → Prometheus exposition format
+GET /metrics   → Prometheus exposition format (scraped every 15s)
 ```
 
 ---
 
-## Grafana dashboard queries
+## Helm reference
 
-| Panel | PromQL | What it shows |
-|---|---|---|
-| Submission rate | `rate(tasks_submitted_total[5m])` | Tasks per second |
-| Queue depth | `task_queue_depth` | Tasks waiting to be picked up |
-| Success rate | `rate(tasks_completed_total{status="complete"}[5m])` | Completions per second |
-| Failure rate | `rate(tasks_completed_total{status="failed"}[5m])` | Failures per second |
-| p99 latency | `histogram_quantile(0.99, rate(task_duration_seconds_bucket[5m]))` | 99th percentile agent duration |
+```bash
+# Render all templates locally without installing
+helm template agent-runner ./charts/agent-runner --set anthropicApiKey=test
+
+# Lint for common issues
+helm lint ./charts/agent-runner --set anthropicApiKey=test
+
+# Install
+helm install agent-runner ./charts/agent-runner \
+  --namespace agent-runner --create-namespace \
+  --set anthropicApiKey=$ANTHROPIC_API_KEY
+
+# Upgrade after any change to templates or values
+helm upgrade agent-runner ./charts/agent-runner \
+  --namespace agent-runner \
+  --set anthropicApiKey=$ANTHROPIC_API_KEY
+
+# See the active values for a running release
+helm get values agent-runner -n agent-runner
+
+# See the rendered manifests of a running release
+helm get manifest agent-runner -n agent-runner
+
+# Uninstall the application cleanly
+helm uninstall agent-runner -n agent-runner
+
+# Uninstall the observability stack separately
+helm uninstall prometheus-stack -n monitoring
+
+# List all releases across all namespaces
+helm list -A
+```
 
 ---
 
 ## Key design decisions
 
-**Jobs not threads** — each agent task runs in an isolated Pod. One agent stuck in a loop consuming memory doesn't affect others.
+**Jobs not threads** — each agent task runs in an isolated Pod with its own resource limits and failure domain. One agent stuck in a loop consuming memory does not affect others. A thread-per-task model inside a single server lets one bad task take down everything.
 
-**LangGraph state machine** — the agent accumulates context as it moves through nodes. The plan node decides what to do, search gathers facts, reason synthesizes, write produces the answer. The full trace is stored and inspectable.
+**LangGraph state machine** — the agent accumulates context as it moves through nodes. The plan node decides what to do, search gathers facts, reason synthesizes, write produces the answer. Each step builds on the last. The full trace is stored and inspectable via the API.
 
-**Redis not a database** — BRPOP blocks atomically until a task arrives, waking exactly one worker with zero CPU overhead.
+**Redis not a database** — BRPOP blocks atomically until a task arrives, waking exactly one worker with zero CPU overhead. A Postgres queue needs polling, locking, a status column, and a reaper job — 200 lines of infrastructure for two Redis commands.
 
-**StatefulSet for Redis, Deployment for everything else** — Redis needs stable identity and storage. StatefulSets guarantee redis-0 always reattaches to the same PersistentVolume.
+**StatefulSet for Redis, Deployment for everything else** — Redis needs stable identity and storage across restarts. StatefulSets guarantee `redis-0` always reattaches to the same PersistentVolume.
 
-**Scoped RBAC** — the launcher ServiceAccount can only create Jobs in its namespace. Compromised Pod has minimal blast radius.
+**Scoped RBAC** — the launcher ServiceAccount can only create Jobs in its namespace. A compromised Pod has a minimal blast radius — it cannot read Secrets, modify Deployments, or touch other namespaces.
 
-**Helm chart** — the entire application deploys in one command to any Kubernetes cluster.
+**Helm chart for the application layer only** — Prometheus and Grafana are cluster-wide infrastructure, not application-specific. They are installed separately so multiple applications can share the same observability stack. A future release will add `kube-prometheus-stack` as a chart dependency for fully one-command installation.
+
+---
+
+## Debugging reference
+
+```bash
+# Pod not starting
+kubectl describe pod <pod-name> -n agent-runner
+kubectl logs <pod-name> -n agent-runner -p        # previous crashed container
+
+# Job failed
+kubectl get jobs -n agent-runner
+kubectl logs job/<job-name> -n agent-runner
+kubectl delete jobs -n agent-runner --field-selector status.successful=0
+
+# Redis inspection
+kubectl exec -it redis-0 -n agent-runner -- redis-cli
+  LLEN task_queue           # queue depth
+  LRANGE task_queue 0 -1    # all queued task_ids
+  GET task:<id>             # full task JSON
+
+# Prometheus not scraping
+kubectl logs -n monitoring deployment/prometheus-stack-kube-prom-operator --tail=50
+
+# Helm troubleshooting
+helm template agent-runner ./charts/agent-runner --set anthropicApiKey=test
+helm get manifest agent-runner -n agent-runner
+```
 
 ---
 
@@ -307,14 +429,9 @@ GET /metrics   → Prometheus exposition format
 
 ---
 
-## Debugging reference
+## Planned improvements
 
-```bash
-kubectl describe pod <pod-name> -n agent-runner
-kubectl logs <pod-name> -n agent-runner -p
-kubectl get jobs -n agent-runner
-kubectl exec -it redis-0 -n agent-runner -- redis-cli
-kubectl logs -n monitoring deployment/prometheus-stack-kube-prom-operator --tail=50
-helm template agent-runner ./charts/agent-runner --set anthropicApiKey=test | grep -A5 "kind:"
-kubectl delete jobs -n agent-runner --field-selector status.successful=0
-```
+- **Helm sub-chart dependency** — add `kube-prometheus-stack` as a chart dependency so the entire system including Prometheus and Grafana installs in one command
+- **Conversation memory** — add user_id to the task payload and use LangGraph's Redis checkpointer to persist agent state across tasks
+- **Cloud deployment** — push images to GitHub Container Registry and deploy to a real cluster on Hetzner or AWS EKS
+- **Alerting** — add PrometheusRule for job failure rate and queue depth thresholds
