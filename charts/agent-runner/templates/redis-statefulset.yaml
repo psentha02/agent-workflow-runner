@@ -1,0 +1,49 @@
+# charts/agent-runner/templates/redis-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "agent-runner.labels" . | nindent 4 }}
+spec:
+  serviceName: redis-service
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "agent-runner.componentLabels" (dict "component" "redis" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-runner.componentLabels" (dict "component" "redis" "context" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          command:
+            - redis-server
+            - "--appendonly"
+            - "yes"
+            - "--appendfsync"
+            - "everysec"
+          ports:
+            - containerPort: 6379
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.redis.storage }}

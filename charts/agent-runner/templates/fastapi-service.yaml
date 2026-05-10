@@ -1,0 +1,17 @@
+# charts/agent-runner/templates/fastapi-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-service
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "agent-runner.labels" . | nindent 4 }}
+    {{- include "agent-runner.componentLabels" (dict "component" "fastapi" "context" .) | nindent 4 }}
+spec:
+  selector:
+    {{- include "agent-runner.componentLabels" (dict "component" "fastapi" "context" .) | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: {{ .Values.fastapi.port }}
+  type: ClusterIP

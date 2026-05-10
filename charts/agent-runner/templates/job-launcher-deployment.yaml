@@ -1,0 +1,38 @@
+# charts/agent-runner/templates/job-launcher-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-launcher
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "agent-runner.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "agent-runner.componentLabels" (dict "component" "job-launcher" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-runner.componentLabels" (dict "component" "job-launcher" "context" .) | nindent 8 }}
+    spec:
+      serviceAccountName: job-launcher-sa
+      containers:
+        - name: launcher
+          image: "{{ .Values.launcher.image.repository }}:{{ .Values.launcher.image.tag }}"
+          imagePullPolicy: {{ .Values.launcher.image.pullPolicy }}
+          env:
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: WORKER_IMAGE
+              value: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+            - name: NAMESPACE
+              value: {{ .Values.namespace }}
+            - name: JOB_BACKOFF_LIMIT
+              value: {{ .Values.worker.job.backoffLimit | quote }}
+            - name: JOB_DEADLINE_SECONDS
+              value: {{ .Values.worker.job.activeDeadlineSeconds | quote }}
+            - name: JOB_TTL_SECONDS
+              value: {{ .Values.worker.job.ttlSecondsAfterFinished | quote }}
+          resources:
+            {{- toYaml .Values.launcher.resources | nindent 12 }}

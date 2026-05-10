@@ -1,0 +1,15 @@
+# charts/agent-runner/Chart.yaml
+apiVersion: v2
+name: agent-runner
+description: Kubernetes-native AI task platform — runs LangGraph agents as isolated Jobs
+type: application
+version: 1.0.0
+appVersion: "5.0.0"
+keywords:
+  - ai
+  - kubernetes
+  - langgraph
+  - agents
+  - mlops
+maintainers:
+  - name: Praveen Sentha

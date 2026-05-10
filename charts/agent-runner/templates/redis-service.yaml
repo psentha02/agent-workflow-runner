@@ -1,0 +1,15 @@
+# charts/agent-runner/templates/redis-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "agent-runner.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "agent-runner.componentLabels" (dict "component" "redis" "context" .) | nindent 4 }}
+  ports:
+    - port: 6379
+      targetPort: 6379

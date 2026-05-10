@@ -1,0 +1,40 @@
+# charts/agent-runner/templates/fastapi-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "agent-runner.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.fastapi.replicas }}
+  selector:
+    matchLabels:
+      {{- include "agent-runner.componentLabels" (dict "component" "fastapi" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-runner.componentLabels" (dict "component" "fastapi" "context" .) | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.fastapi.port | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.fastapi.image.repository }}:{{ .Values.fastapi.image.tag }}"
+          imagePullPolicy: {{ .Values.fastapi.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.fastapi.port }}
+          env:
+            - name: REDIS_HOST
+              value: "redis-service"
+          resources:
+            {{- toYaml .Values.fastapi.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.fastapi.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
